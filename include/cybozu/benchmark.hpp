@@ -4,7 +4,7 @@
 	@brief measure exec time of function
 	@author MITSUNARI Shigeo
 */
-#if defined(_MSC_VER) && (MSC_VER <= 1500)
+#if defined(_MSC_VER) && (_MSC_VER <= 1500)
 	#include <cybozu/inttype.hpp>
 #else
 	#include <stdint.h>

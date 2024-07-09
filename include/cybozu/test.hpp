@@ -12,7 +12,7 @@
 #include <list>
 #include <iostream>
 #include <utility>
-#if defined(_MSC_VER) && (MSC_VER <= 1500)
+#if defined(_MSC_VER) && (_MSC_VER <= 1500)
 	#include <cybozu/inttype.hpp>
 #else
 	#include <stdint.h>

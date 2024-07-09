@@ -5,7 +5,7 @@
 	@author MITSUNARI Shigeo(@herumi)
 */
 
-#if defined(_MSC_VER) && (MSC_VER <= 1500) && !defined(CYBOZU_DEFINED_INTXX)
+#if defined(_MSC_VER) && (_MSC_VER <= 1500) && !defined(CYBOZU_DEFINED_INTXX)
 	#define CYBOZU_DEFINED_INTXX
 	typedef __int64 int64_t;
 	typedef unsigned __int64 uint64_t;
