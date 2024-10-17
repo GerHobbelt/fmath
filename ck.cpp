@@ -85,7 +85,7 @@ void benchmark_v()
 	printf("expd_v:%.3fclk\n", clk.getClock() / double(n) / clk.getCount());
 }
 
-int main()
+int main(void)
 {
 	puts("IN");
 	printf("exp  : %.17f\n",         exp(2.0000314));

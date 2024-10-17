@@ -1062,7 +1062,7 @@ void testSlots()
 	}
 }
 
-int main()
+int main(void)
 {
 	testLimits();
 	testSlots();

@@ -32,7 +32,7 @@ void putCoeff()
 	}
 }
 
-int main()
+int main(void)
 {
 	const uint32_t minx = 0xc2aeac50;
 	const uint32_t maxx = 0x42b17218;

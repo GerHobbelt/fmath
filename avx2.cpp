@@ -122,7 +122,7 @@ void check_pow_ps()
 		}
 	}
 }
-int main()
+int main(void)
 {
 	check_exp_ps256();
 	check_exp_pd();
