@@ -4,6 +4,8 @@ import argparse
 
 SIMD_BYTE = 64
 
+DATA_BASE = 'data_base'
+
 # expand args
 # Unroll(2, op, [xm0, xm1], [xm2, xm3], xm4)
 # -> op(xm0, xm2, xm4)
@@ -57,11 +59,9 @@ def setFloat(r, v):
 # src : src pointer register
 # n : size of array
 # unrollN : number of unroll
-# v0 = args[0] : input/output parameters
-# args[1:] : temporary parameter
-def framework(func, dst, src, n, unrollN, args):
+# v0 : input/output parameters
+def framework(func, dst, src, n, unrollN, v0):
   un = genUnrollFunc(unrollN)
-  v0 = args[0]
   mod16L = Label()
   exitL = Label()
   lpL = Label()
@@ -76,7 +76,7 @@ def framework(func, dst, src, n, unrollN, args):
   L(lpUnrollL)
   un(vmovups)(v0, ptr(src))
   add(src, 64*unrollN)
-  func(unrollN, args)
+  func(unrollN, v0)
   un(vmovups)(ptr(dst), v0)
   add(dst, 64*unrollN)
   sub(n, 16*unrollN)
@@ -90,7 +90,7 @@ def framework(func, dst, src, n, unrollN, args):
   L(lpL)
   vmovups(zm0, ptr(src))
   add(src, 64)
-  func(1, args)
+  func(1, v0)
   vmovups(ptr(dst), zm0)
   add(dst, 64)
   sub(n, 16)
@@ -106,17 +106,141 @@ def framework(func, dst, src, n, unrollN, args):
   sub(eax, 1)
   kmovd(k1, eax)
   vmovups(zm0|k1|T_z, ptr(src))
-  func(1, args)
+  func(1, v0)
   vmovups(ptr(dst)|k1, zm0)
   L(exitL)
 
+class Counter:
+  def __init__(self):
+    self.c = 0
+  def set(self, c):
+    self.c = c
+  def add(self, v):
+    self.c += v
+  def get(self):
+    return self.c
+
+  def __enter__(self):
+    self.keep = self.c
+    return self
+  def __exit__(self, ex_type, ex_value, trace):
+    self.c = self.keep
+
+class RegManager:
+  def __init__(self, v):
+    self.v = v
+    self.pos = Counter()
+
+  def allocReg(self, n):
+    pos = self.pos.get()
+    self.pos.add(n)
+    return self.v[pos:pos+n]
+
+  def allocReg1(self):
+    return self.allocReg(1)[0]
+
+def getTypeSize(t):
+  tbl = {
+    'u8' : (int, 8),
+    'u32': (int, 32),
+    'u64': (int, 64),
+    'f32': (float, 32),
+    'f64': (float, 64),
+  }
+  return tbl[t]
+
+class MemData:
+  def __init__(self, t, v):
+    (self.t, self.size) = getTypeSize(t)
+    tbl = {
+      (int, 8) : db_,
+      (int, 32) : dd_,
+      (int, 64) : dq_,
+      (float, 32) : dd_,
+      (float, 64) : dq_,
+    }
+    self.writer = tbl[(self.t, self.size)]
+    self.v = v
+
+  def getByteSize(self):
+    if isinstance(self.v, list):
+      n = len(self.v)
+    else:
+      n = 1
+    return (self.size // 8) * n
+
+  def write(self):
+    if isinstance(self.v, list):
+      v = self.v
+    else:
+      v = [self.v]
+    if self.t == float:
+      if self.size == 32:
+        v = map(lambda x:hex(float2uint(x)), v)
+      else:
+        v = map(lambda x:hex(double2uint(x)), v)
+    self.writer(v)
+
+class MemManager:
+  def __init__(self):
+    self.v = {}
+    self.pos = 0
+
+  def append(self, name, m):
+    self.v[name] = (m, self.pos)
+    self.pos += m.getByteSize()
+
+  def getPos(self, name):
+    return self.v[name][1]
+
+  def setReg(self, reg, baseAddr, name, offset=0, broadcast=False):
+    """
+    reg <- ptr(baseAddr + pos specified by name + offset)
+    """
+    if broadcast:
+      vbroadcastss(reg, ptr(baseAddr + self.getPos(name) + offset))
+    else:
+      vmovups(reg, ptr(baseAddr + self.getPos(name) + offset))
+
+class Algo:
+  def __init__(self, unrollN, mode, memManager):
+    self.unrollN = unrollN
+    self.mode = mode
+    self.tmpRegN = 0 # # of temporary registers
+    self.constRegN = 0 # # of constant (permanent) registers
+    self.memManager = memManager
+
+  def setTmpRegN(self, tmpRegN):
+    self.tmpRegN = tmpRegN
+
+  def setConstRegN(self, constRegN):
+    self.constRegN = constRegN
+
+  def getTotalRegN(self):
+    return self.tmpRegN * self.unrollN + self.constRegN
+
+  def getMaskRegs(self, n):
+    """
+    get n elements mask regs
+    v0 is not exists and v1 is reserved, so idx begins with number 2
+    """
+    vk = []
+    for i in range(self.unrollN):
+      vk.append(MaskReg(i+2))
+    return vk
+
 # exp_v(float *dst, const float *src, size_t n);
-class ExpGen:
-  def __init__(self, param):
-    self.unrollN = param.exp_unrollN
-    self.mode = param.exp_mode
+class ExpGen(Algo):
+  def __init__(self, unrollN, mode, memManager):
+    super().__init__(unrollN, mode, memManager)
+    self.setTmpRegN(3)
+    self.EXP_COEF_N = 6
+    self.setConstRegN(self.EXP_COEF_N + 1) # coeff[], log2_e
+
   def data(self):
-    align(32)
+    m = MemData('f32', 1/math.log(2))
+    m.write()
+    self.memManager.append('log2_e', m)
 
     # Approximate polynomial of degree 5 of 2^x in [-0.5, 0.5]
     expTblSollya = [
@@ -135,132 +259,122 @@ class ExpGen:
       0.96672496496672653297e-2,
       0.13395279182003177132e-2,
     ]
-    self.expTbl = expTblMaple
-    self.EXP_COEF = 'exp_coef'
-    makeLabel(self.EXP_COEF)
-    for v in self.expTbl:
-      dd_(hex(float2uint(v)))
+    tbl = expTblMaple
+    m = MemData('f32', tbl)
+    m.write()
+    self.memManager.append('exp_coef', m)
 
-    if self.mode == 'allreg':
-      self.EXP_COEF_N = 6
-      self.EXP_CONST_N = self.EXP_COEF_N + 1 # coeff[], log2_e
-    elif self.mode == 'allimm':
-      self.EXP_COEF_N = 0
-      self.EXP_CONST_N = 2 # coeff[], log2_e, tx
-    elif self.mode == 'allimm2':
-      self.EXP_COEF_N = 0
-      self.EXP_CONST_N = 3 # coeff[], log2_e, tx, tx2
-    else:
-      self.EXP_COEF_N = 0
-      self.EXP_CONST_N = 1 # log2_e
+  def expCore(self, n, v0):
+    with self.regManager.pos:
+      v1 = self.regManager.allocReg(n)
+      v2 = self.regManager.allocReg(n)
 
-  def expCore(self, n, args):
-    (v0, v1, v2) = args
-    un = genUnrollFunc(n)
-    un(vmulps)(v0, v0, self.log2_e)
-    un(vreduceps)(v1, v0, 0) # a = x - n
-    un(vsubps)(v0, v0, v1) # n = x - a = round(x)
+      un = genUnrollFunc(n)
+      un(vmulps)(v0, v0, self.log2_e)
+      un(vreduceps)(v1, v0, 0) # a = x - n
+      un(vsubps)(v0, v0, v1) # n = x - a = round(x)
 
-    if self.mode == 'allreg':
       un(vmovaps)(v2, self.expCoeff[5])
       for i in range(4, -1, -1):
         un(vfmadd213ps)(v2, v1, self.expCoeff[i])
       un(vscalefps)(v0, v2, v0) # v2 * 2^n
 
-    if self.mode == 'allmem':
-      lea(rax, ptr(rip+self.EXP_COEF))
-      vpbroadcastd(v2[0], ptr(rax+5*4))
-      for i in range(1, n):
-        un(vmovaps)(v2[i], v2[0])
-      for i in range(4, -1, -1):
-        un(vfmadd213ps)(v2, v1, ptr_b(rax+i*4))
-      un(vscalefps)(v0, v2, v0) # v2 * 2^n
-
-    if self.mode == 'allimm':
-      mov(eax, float2uint(self.expTbl[5]))
-      vpbroadcastd(v2[0], eax)
-      for i in range(1, n):
-        un(vmovaps)(v2[i], v2[0])
-
-      for i in range(4, -1, -1):
-        mov(eax, float2uint(self.expTbl[i]))
-        vpbroadcastd(self.tx, eax)
-        un(vfmadd213ps)(v2, v1, self.tx)
-      un(vscalefps)(v0, v2, v0) # v2 * 2^n
-
-    if self.mode == 'allimm2':
-      mov(eax, float2uint(self.expTbl[5]))
-      vpbroadcastd(v2[0], eax)
-      mov(eax, float2uint(self.expTbl[4]))
-      vpbroadcastd(self.tx, eax)
-      for i in range(1, n):
-        un(vmovaps)(v2[i], v2[0])
-
-      mov(eax, float2uint(self.expTbl[3]))
-      vpbroadcastd(self.tx2, eax)
-      un(vfmadd213ps)(v2, v1, self.tx)
-
-      mov(eax, float2uint(self.expTbl[2]))
-      vpbroadcastd(self.tx, eax)
-      un(vfmadd213ps)(v2, v1, self.tx2)
-
-      mov(eax, float2uint(self.expTbl[1]))
-      vpbroadcastd(self.tx2, eax)
-      un(vfmadd213ps)(v2, v1, self.tx)
-
-      mov(eax, float2uint(self.expTbl[0]))
-      vpbroadcastd(self.tx, eax)
-      un(vfmadd213ps)(v2, v1, self.tx2)
-
-      un(vfmadd213ps)(v2, v1, self.tx)
-
-      un(vscalefps)(v0, v2, v0) # v2 * 2^n
-
   def code(self):
     unrollN = self.unrollN
-    EXP_TMP_N = 3
     align(16)
     with FuncProc('fmath_expf_avx512'):
-      with StackFrame(3, 1, useRCX=True, vNum=EXP_TMP_N*unrollN+self.EXP_CONST_N, vType=T_ZMM) as sf:
+      with StackFrame(3, 0, useRCX=True, vNum=self.getTotalRegN(), vType=T_ZMM) as sf:
+        self.regManager = RegManager(sf.v)
         dst = sf.p[0]
         src = sf.p[1]
         n = sf.p[2]
-        v0 = sf.v[0:unrollN]
-        v1 = sf.v[1*unrollN:2*unrollN]
-        v2 = sf.v[2*unrollN:3*unrollN]
-        constPos = EXP_TMP_N*unrollN
-        self.expCoeff = sf.v[constPos:constPos+self.EXP_COEF_N]
-        self.log2_e = sf.v[constPos+self.EXP_COEF_N]
-        if self.mode == 'allimm':
-          self.tx = sf.v[constPos+self.EXP_COEF_N+1]
-        if self.mode == 'allimm2':
-          self.tx = sf.v[constPos+self.EXP_COEF_N+1]
-          self.tx2 = sf.v[constPos+self.EXP_COEF_N+2]
+        lea(rax, ptr(rip + DATA_BASE))
+        v0 = self.regManager.allocReg(unrollN)
+        self.expCoeff = self.regManager.allocReg(self.EXP_COEF_N)
+        self.log2_e = self.regManager.allocReg1()
 
-        setFloat(self.log2_e, 1/math.log(2))
+        self.memManager.setReg(self.log2_e, rax, 'log2_e', broadcast=True)
         for i in range(self.EXP_COEF_N):
-          vbroadcastss(self.expCoeff[i], ptr(rip + self.EXP_COEF + 4 * i))
+          self.memManager.setReg(self.expCoeff[i], rax, 'exp_coef', offset=4*i, broadcast=True)
 
-        framework(self.expCore, dst, src, n, unrollN, (v0, v1, v2))
+        framework(self.expCore, dst, src, n, unrollN, v0)
 
 # log_v(float *dst, const float *src, size_t n);
-class LogGen:
-  def __init__(self, param):
-    self.unrollN = param.log_unrollN
-    self.mode = param.log_mode
+class LogGen(Algo):
+  def __init__(self, unrollN, mode, memManager):
+    super().__init__(unrollN, mode, memManager)
     self.precise = True
     self.checkSign = False # return -Inf for 0 and NaN for negative
     self.L = 4 # table bit size (4 or 5)
     self.deg = 4 # degree of poly (4 or 3)
+    tmpRegN = 4
+    if self.precise:
+      tmpRegN += 1
+    constRegN = 5 # tbl1, tbl2, t, one, c[deg]
+    if self.L == 5:
+      constRegN += 2 # tbl1H, tbl2H
+    self.setTmpRegN(tmpRegN)
+    self.setConstRegN(constRegN)
   def data(self):
-    align(32)
     self.LOG_COEF = 'log_coef'
     makeLabel(self.LOG_COEF)
     if self.deg == 3:
       self.ctbl = [1.0, -0.50004360205995410, 0.3333713161833]
     else:
       self.ctbl = [1.0, -0.49999999, 0.3333955701, -0.25008487]
-# self.ctbl = [1.0, -0.4999999964869, 0.3333713161833, -0.250051797]
+
+    m = MemData('f32', self.ctbl)
+    m.write()
+    self.memManager.append('log_coef', m)
+
+    m = MemData('f32', math.log(2))
+    m.write()
+    self.memManager.append('log2', m)
+
+    m = MemData('u32', hex(0x7fffffff))
+    m.write()
+    self.C_0x7fffffff = 'abs_mask'
+    self.memManager.append(self.C_0x7fffffff, m)
+
+    self.BOUNDARY = 'log_boundary'
+#    makeLabel(self.BOUNDARY)
+    if self.L == 4:
+      bound = 0.02
+    else:
+      bound = 0.01
+    m = MemData('f32', bound)
+    m.write()
+    self.memManager.append(self.BOUNDARY, m)
+
+    self.NaN = 'log_nan'
+    m = MemData('u32', hex(0x7fc00000))
+    m.write()
+    self.memManager.append(self.NaN, m)
+
+    self.mInf = 'log_mInf'
+    m = MemData('u32', hex(0xff800000))
+    m.write()
+    self.memManager.append(self.mInf, m)
+
+    self.logTbl1 = []
+    self.logTbl2 = []
+    LN = 1 << self.L
+    for i in range(LN):
+      u = (127 << 23) | ((i*2+1) << (23 - self.L - 1))
+      v = 1 / uint2float(u)
+      v = uint2float(float2uint(v)) # enforce C float type instead of double
+      # v = numpy.float32(v)
+      self.logTbl1.append(v)
+      self.logTbl2.append(math.log(v))
+    self.LOG_TBL1 = 'log_tbl1'
+    self.LOG_TBL2 = 'log_tbl2'
+    m = MemData('f32', self.logTbl1)
+    m.write()
+    self.memManager.append(self.LOG_TBL1, m)
+    m = MemData('f32', self.logTbl2)
+    m.write()
+    self.memManager.append(self.LOG_TBL2, m)
+
     for v in self.ctbl:
       dd_(hex(float2uint(v)))
 
@@ -317,95 +431,95 @@ class LogGen:
   a = (1 + c) / b
   log a = log(1 + c) - log b
   """
-  def logCore(self, n, args):
-    (v0, v1, v2, v3, keepX, vk) = args
-    t = self.t
-    un = genUnrollFunc(n)
-    if self.precise:
-      un(vmovaps)(keepX, v0)
+  def logCore(self, n, v0):
+    with self.regManager.pos:
+      v1 = self.regManager.allocReg(n)
+      v2 = self.regManager.allocReg(n)
+      v3 = self.regManager.allocReg(n)
 
-    un(vgetexpps)(v1, v0) # n
-    un(vgetmantps)(v0, v0, 0) # a
-    un(vpsrad)(v2, v0, 23 - self.L) # d
+      t = self.t
+      un = genUnrollFunc(n)
+      if self.precise:
+        keepX = self.regManager.allocReg(n)
+        un(vmovaps)(keepX, v0)
 
-    if self.L == 4:
-      un(vpermps)(v3, v2, self.tbl1) # b
-      un(vfmsub213ps)(v0, v3, self.one) # c = a * b - 1
-      un(vpermps)(v3, v2, self.tbl2) # log_b
-    elif self.L == 5:
-      un(vmovaps)(v3, v2)
-      un(vpermi2ps)(v2, self.tbl1, self.tbl1H) # b
-      un(vfmsub213ps)(v0, v2, self.one) # c = a * b - 1
-      un(vpermi2ps)(v3, self.tbl2, self.tbl2H) # log_b
+      un(vgetexpps)(v1, v0) # n
+      un(vgetmantps)(v0, v0, 0) # a
+      un(vpsrad)(v2, v0, 23 - self.L) # d
 
-    un(vfmsub132ps)(v1, v3, ptr_b(rip+self.LOG2)) # z = n * log2 - log_b
+      if self.L == 4:
+        un(vpermps)(v3, v2, self.tbl1) # b
+        un(vfmsub213ps)(v0, v3, self.one) # c = a * b - 1
+        un(vpermps)(v3, v2, self.tbl2) # log_b
+      elif self.L == 5:
+        un(vmovaps)(v3, v2)
+        un(vpermi2ps)(v2, self.tbl1, self.tbl1H) # b
+        un(vfmsub213ps)(v0, v2, self.one) # c = a * b - 1
+        un(vpermi2ps)(v3, self.tbl2, self.tbl2H) # log_b
 
-    # precise log for small |x-1|
-    if self.precise:
-      un(vsubps)(v2, keepX, self.one) # x-1
-      un(vandps)(v3, v2, ptr_b(rip+self.C_0x7fffffff)) # |x-1|
-      un(vcmpltps)(vk, v3, ptr_b(rip+self.BOUNDARY))
-      un(vmovaps)(zipOr(v0, vk), v2) # c = v0 = x-1
-      un(vxorps)(zipOr(v1, vk), v1, v1) # z = 0
+      un(vfmsub132ps)(v1, v3, ptr_b(rip+self.LOG2)) # z = n * log2 - log_b
+#      un(vfmsub132ps)(v1, v3, ptr_b(self.baseAddr + self.memManager.getPos('log2'))) # z = n * log2 - log_b
 
-    un(vmovaps)(v2, self.c3)
-    if self.deg == 4:
-      un(vfmadd213ps)(v2, v0, ptr_b(rip+self.LOG_COEF+2*4)) # t = c4 * v0 + c3
-    un(vfmadd213ps)(v2, v0, ptr_b(rip+self.LOG_COEF+1*4)) # t = t * v0 + c2
-    un(vfmadd213ps)(v2, v0, self.one) # t = t * v0 + 1
-    un(vfmadd213ps)(v0, v2, v1) # v0 = v0 * t + z
+      # precise log for small |x-1|
+      if self.precise:
+        vk = self.getMaskRegs(self.unrollN)
+        un(vsubps)(v2, keepX, self.one) # x-1
+        un(vandps)(v3, v2, ptr_b(rip+self.C_0x7fffffff)) # |x-1|
+#        un(vandps)(v3, v2, ptr_b(self.baseAddr + self.memManager.getPos(self.C_0x7fffffff))) # |x-1|
+        un(vcmpltps)(vk, v3, ptr_b(rip+self.BOUNDARY))
+#        un(vcmpltps)(vk, v3, ptr_b(self.baseAddr + self.memManager.getPos(self.BOUNDARY)))
+        un(vmovaps)(zipOr(v0, vk), v2) # c = v0 = x-1
+        un(vxorps)(zipOr(v1, vk), v1, v1) # z = 0
 
-    if self.checkSign:
-      # check x < 0 or x == 0
-      NEG = 1 << 6
-      ZERO = (1 << 1) | (1 << 2)
-      un(vfpclassps)(vk, keepX, NEG)
-      un(vblendmps)(zipOr(v0, vk), v0, ptr_b(rip+self.NaN))
-      un(vfpclassps)(vk, keepX, ZERO)
-      un(vblendmps)(zipOr(v0, vk), v0, ptr_b(rip+self.mInf))
+      un(vmovaps)(v2, self.c3)
+      if self.deg == 4:
+        un(vfmadd213ps)(v2, v0, ptr_b(rip+self.LOG_COEF+2*4)) # t = c4 * v0 + c3
+#        un(vfmadd213ps)(v2, v0, ptr_b(self.baseAddr + self.memManager.getPos('log_coef')+2*4)) # t = c4 * v0 + c3
+      un(vfmadd213ps)(v2, v0, ptr_b(rip+self.LOG_COEF+1*4)) # t = t * v0 + c2
+#      un(vfmadd213ps)(v2, v0, ptr_b(self.baseAddr + self.memManager.getPos('log_coef')+1*4)) # t = t * v0 + c2
+      un(vfmadd213ps)(v2, v0, self.one) # t = t * v0 + 1
+      un(vfmadd213ps)(v0, v2, v1) # v0 = v0 * t + z
+
+      if self.checkSign:
+        # check x < 0 or x == 0
+        NEG = 1 << 6
+        ZERO = (1 << 1) | (1 << 2)
+        un(vfpclassps)(vk, keepX, NEG)
+        un(vblendmps)(zipOr(v0, vk), v0, ptr_b(rip+self.NaN))
+        un(vfpclassps)(vk, keepX, ZERO)
+        un(vblendmps)(zipOr(v0, vk), v0, ptr_b(rip+self.mInf))
 
   def code(self):
     unrollN = self.unrollN
-    LOG_TMP_N = 4
-    if self.precise:
-      LOG_TMP_N += 1
-    LOG_CONST_N = 5 # tbl1, tbl2, t, one, c[deg]
-    if self.L == 5:
-      LOG_CONST_N += 2 # tbl1H, tbl2H
+    tmpN = self.tmpRegN
     align(16)
     with FuncProc('fmath_logf_avx512'):
-      with StackFrame(3, 1, useRCX=True, vNum=LOG_TMP_N*unrollN+LOG_CONST_N, vType=T_ZMM) as sf:
+      with StackFrame(3, 1, useRCX=True, vNum=self.getTotalRegN(), vType=T_ZMM) as sf:
+        self.regManager = RegManager(sf.v)
         dst = sf.p[0]
         src = sf.p[1]
         n = sf.p[2]
-        v0 = sf.v[0:unrollN]
-        v1 = sf.v[1*unrollN:2*unrollN]
-        v2 = sf.v[2*unrollN:3*unrollN]
-        v3 = sf.v[3*unrollN:4*unrollN]
-        vk = []
-        if self.precise:
-          keepX = sf.v[4*unrollN:5*unrollN]
-          for i in range(unrollN):
-            vk.append(MaskReg(i+2))
-        else:
-          keepX = []
-        constPos = LOG_TMP_N*unrollN
-        self.one = sf.v[constPos]
-        self.tbl1 = sf.v[constPos+1]
-        self.tbl2 = sf.v[constPos+2]
-        self.t = sf.v[constPos+3]
-        setFloat(self.one, 1.0)
-        self.c3 = sf.v[constPos+4]
-        setFloat(self.c3, self.ctbl[self.deg - 1])
-        vmovups(self.tbl1, ptr(rip + self.LOG_TBL1))
-        vmovups(self.tbl2, ptr(rip + self.LOG_TBL2))
-        if self.L == 5:
-          self.tbl1H = sf.v[constPos+5]
-          self.tbl2H = sf.v[constPos+6]
-          vmovups(self.tbl1H, ptr(rip + self.LOG_TBL1 + 64))
-          vmovups(self.tbl2H, ptr(rip + self.LOG_TBL2 + 64))
+        baseAddr = sf.t[0]
+        self.baseAddr = baseAddr
+        lea(baseAddr, ptr(rip + DATA_BASE))
+        v0 = self.regManager.allocReg(unrollN)
+        self.one = self.regManager.allocReg1()
+        self.tbl1 = self.regManager.allocReg1()
+        self.tbl2 = self.regManager.allocReg1()
+        self.t = self.regManager.allocReg1()
+        self.c3 = self.regManager.allocReg1()
 
-        framework(self.logCore, dst, src, n, unrollN, (v0, v1, v2, v3, keepX, vk))
+        setFloat(self.one, 1.0)
+        self.memManager.setReg(self.c3, baseAddr, 'log_coef', offset=(self.deg-1)*4, broadcast=True)
+        self.memManager.setReg(self.tbl1, baseAddr, 'log_tbl1')
+        self.memManager.setReg(self.tbl2, baseAddr, 'log_tbl2')
+        if self.L == 5:
+          self.tbl1H = self.regManager.allocReg1()
+          self.tbl2H = self.regManager.allocReg1()
+          self.memManager.setReg(self.tbl1H, baseAddr, 'log_tbl1', offset=64)
+          self.memManager.setReg(self.tbl2H, baseAddr, 'log_tbl2', offset=64)
+
+        framework(self.logCore, dst, src, n, unrollN, v0)
 
 def main():
   parser = getDefaultParser()
@@ -417,9 +531,11 @@ def main():
   param = parser.parse_args()
 
   init(param)
-  exp = ExpGen(param)
-  log = LogGen(param)
   segment('data')
+  output(DATA_BASE + ':')
+  memManager = MemManager()
+  exp = ExpGen(param.exp_unrollN, param.exp_mode, memManager)
+  log = LogGen(param.log_unrollN, param.log_mode, memManager)
   exp.data()
   log.data()
 
