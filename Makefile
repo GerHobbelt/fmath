@@ -1,17 +1,6 @@
-GCC_VER=$(shell $(CXX) -dumpversion)
-ifeq ($(shell expr $(GCC_VER) \>= 4.2),1)
-    ADD_OPT+=-march=native
-endif
-ifeq ($(shell expr $(GCC_VER) \>= 4.5),1)
-    ADD_OPT+=-fexcess-precision=fast
-endif
-AVX2=$(shell head -27 /proc/cpuinfo 2>/dev/null |awk '/avx2/ {print $$1}')
-ifeq ($(AVX2),flags)
-	HAS_AVX2=-mavx2
-endif
 PYTHON?=python3
-INC_DIR= -I../src -I../xbyak -I./include
-CFLAGS += $(INC_DIR) -O3 $(HAS_AVX2) $(ADD_OPT) -DNDEBUG
+INC_DIR= -I../src  -I./include -I./test
+CFLAGS += $(INC_DIR) -O2 -DNDEBUG -std=c++20 -mfma
 CFLAGS_WARN=-Wall -Wextra -Wformat=2 -Wcast-qual -Wcast-align -Wwrite-strings -Wfloat-equal -Wpointer-arith
 CFLAGS+=$(CFLAGS_WARN)
 LDFLAGS=-L lib -lfmath
@@ -37,16 +26,23 @@ obj/fmath.o: src/fmath.S
 #	curl https://raw.githubusercontent.com/herumi/s_xbyak/main/s_xbyak.py > $@
 
 src/fmath.S: src/gen_fmath.py src/s_xbyak.py
-	$(PYTHON) $< -m gas -exp_mode $(EXP_MODE) > $@
+	$(PYTHON) $< -m gas > $@
 
 src/fmath.asm: src/gen_fmath.py src/s_xbyak.py
 	$(PYTHON) $< -m masm > $@
 
+LOG_L?=3
+test/table.h: src/gen_fmath.py
+	$(PYTHON) $< -t $(LOG_L) > $@
+
 update:
 	$(MAKE) src/fmath.S src/fmath.asm
 
-obj/%.o: %.cpp include/fmath.h
+obj/%.o: %.cpp include/fmath.h test/table.h
 	$(CXX) -c -o $@ $< $(CFLAGS) -MMD -MP -MF $(@:.o=.d)
+
+obj/cpu.o: cpu.cpp include/fmath.h
+	$(CXX) -c -o $@ $< $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -fno-exceptions -fno-rtti -fno-threadsafe-statics #-fvisibility=hidden
 
 bin/%.exe: obj/%.o $(LIB)
 	$(CXX) -o $@ $< $(LDFLAGS)
@@ -60,10 +56,9 @@ fastexp: fastexp.o
 avx2: avx2.cpp fmath.hpp
 	$(CXX) -o $@ $< -O3 -mavx2 -mtune=native -Iinclude
 
-EXP_MODE?=allreg
 EXP_UN?=4
 exp_unroll_n: obj/exp_v.o
-	@$(PYTHON) src/gen_fmath.py -m gas -exp_un $(EXP_UN) -exp_mode $(EXP_MODE) > src/fmath$(EXP_UN).S
+	@$(PYTHON) src/gen_fmath.py -m gas -exp_un $(EXP_UN) > src/fmath$(EXP_UN).S
 	@$(CXX) -o bin/exp_v$(EXP_UN).exe obj/exp_v.o src/fmath$(EXP_UN).S $(CFLAGS) -I ../include
 	@bin/exp_v$(EXP_UN).exe b
 	@bin/exp_v$(EXP_UN).exe b
@@ -99,7 +94,7 @@ log_unroll: obj/log_v.o
 	@sh -ec 'for i in 1 2 3 4 5; do echo LOG_UN=$$i; make -s log_unroll_n LOG_UN=$$i; done'
 
 clean:
-	$(RM) obj/*.o $(TARGET) bin/*.exe src/*.S
+	$(RM) obj/*.o obj/*.d $(TARGET) bin/*.exe src/*.S
 
 test: bin/exp_v.exe bin/log_v.exe
 	bin/exp_v.exe
