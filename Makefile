@@ -33,7 +33,10 @@ $(LIB): obj/fmath.o obj/cpu.o
 obj/fmath.o: src/fmath.S
 	$(CC) -c $< -o $@
 
-src/fmath.S: src/gen_fmath.py
+#src/s_xbyak.py:
+#	curl https://raw.githubusercontent.com/herumi/s_xbyak/main/s_xbyak.py > $@
+
+src/fmath.S: src/gen_fmath.py src/s_xbyak.py
 	$(PYTHON) $< -m gas -exp_mode $(EXP_MODE) > $@
 
 obj/%.o: %.cpp
@@ -53,50 +56,53 @@ avx2: avx2.cpp fmath.hpp
 
 EXP_MODE?=allreg
 EXP_UN?=4
-exp_unroll_n: exp_v.o
-	@$(PYTHON) gen_fmath.py -m gas -exp_un $(EXP_UN) -exp_mode $(EXP_MODE) > fmath$(EXP_UN).S
-	@$(CXX) -o exp_v$(EXP_UN).exe exp_v.o fmath$(EXP_UN).S $(CFLAGS)
-	@./exp_v$(EXP_UN).exe b
-	@./exp_v$(EXP_UN).exe b
-	@./exp_v$(EXP_UN).exe b
-	@./exp_v$(EXP_UN).exe b
-	@./exp_v$(EXP_UN).exe b
-	@./exp_v$(EXP_UN).exe b
-	@./exp_v$(EXP_UN).exe b
-	@./exp_v$(EXP_UN).exe b
-	@./exp_v$(EXP_UN).exe b
-	@./exp_v$(EXP_UN).exe b
+exp_unroll_n: obj/exp_v.o
+	@$(PYTHON) src/gen_fmath.py -m gas -exp_un $(EXP_UN) -exp_mode $(EXP_MODE) > src/fmath$(EXP_UN).S
+	@$(CXX) -o bin/exp_v$(EXP_UN).exe obj/exp_v.o src/fmath$(EXP_UN).S $(CFLAGS) -I ../include
+	@bin/exp_v$(EXP_UN).exe b
+	@bin/exp_v$(EXP_UN).exe b
+	@bin/exp_v$(EXP_UN).exe b
+	@bin/exp_v$(EXP_UN).exe b
+	@bin/exp_v$(EXP_UN).exe b
+	@bin/exp_v$(EXP_UN).exe b
+	@bin/exp_v$(EXP_UN).exe b
+	@bin/exp_v$(EXP_UN).exe b
+	@bin/exp_v$(EXP_UN).exe b
+	@bin/exp_v$(EXP_UN).exe b
 
-exp_unroll: exp_v.o
+exp_unroll: obj/exp_v.o
 	@sh -ec 'for i in 1 2 3 4 5 6 7 8; do echo EXP_UN=$$i; make -s exp_unroll_n EXP_UN=$$i; done'
 
 LOG_MODE?=allreg
 LOG_UN?=4
-log_unroll_n: log_v.o
-	@$(PYTHON) gen_fmath.py -m gas -log_un $(LOG_UN) -log_mode $(LOG_MODE) > fmath$(LOG_UN).S
-	@$(CXX) -o log_v$(LOG_UN).exe log_v.o fmath$(LOG_UN).S $(CFLAGS)
-	@./log_v$(LOG_UN).exe b
-	@./log_v$(LOG_UN).exe b
-	@./log_v$(LOG_UN).exe b
-	@./log_v$(LOG_UN).exe b
-	@./log_v$(LOG_UN).exe b
-	@./log_v$(LOG_UN).exe b
-	@./log_v$(LOG_UN).exe b
-	@./log_v$(LOG_UN).exe b
-	@./log_v$(LOG_UN).exe b
-	@./log_v$(LOG_UN).exe b
+log_unroll_n: obj/log_v.o
+	@$(PYTHON) src/gen_fmath.py -m gas -log_un $(LOG_UN) -log_mode $(LOG_MODE) > src/fmath$(LOG_UN).S
+	@$(CXX) -o bin/log_v$(LOG_UN).exe obj/log_v.o src/fmath$(LOG_UN).S $(CFLAGS) -I ../include
+	@bin/log_v$(LOG_UN).exe b
+	@bin/log_v$(LOG_UN).exe b
+	@bin/log_v$(LOG_UN).exe b
+	@bin/log_v$(LOG_UN).exe b
+	@bin/log_v$(LOG_UN).exe b
+	@bin/log_v$(LOG_UN).exe b
+	@bin/log_v$(LOG_UN).exe b
+	@bin/log_v$(LOG_UN).exe b
+	@bin/log_v$(LOG_UN).exe b
+	@bin/log_v$(LOG_UN).exe b
 
-log_unroll: log_v.o
+log_unroll: obj/log_v.o
 	@sh -ec 'for i in 1 2 3 4 5; do echo LOG_UN=$$i; make -s log_unroll_n LOG_UN=$$i; done'
 
 clean:
 	$(RM) obj/*.o $(TARGET) bin/*.exe src/*.S
 
-test: exp_v
-	./exp_v
+test: bin/exp_v.exe bin/log_v.exe
+	bin/exp_v.exe
+	bin/log_v.exe
 
 bench.o: bench.cpp $(HEADER)
 fastexp.o: fastexp.cpp $(HEADER)
+
+.PHONY: test clean
 
 # don't remove these files automatically
 .SECONDARY: $(addprefix obj/, $(ALL_SRC:.cpp=.o))
